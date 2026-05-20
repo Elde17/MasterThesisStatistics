@@ -509,6 +509,9 @@ temp_idx_mat <- matrix(temp_indices_vec, nrow = length(all_years), ncol = n_site
 # ============================================================================== #
 cat("\n--- 7. Assembling Final Stan Data List ---\n")
 
+# Calculate squared distances in R
+dist_mat_anchors_sq <- dist_mat_anchors^2
+
 stan_data_real <- list(
   S = n_sites,
   T_total = length(all_years),
@@ -536,6 +539,7 @@ stan_data_real <- list(
   to_idx = to_idx,        # Renamed
   row_ptr = row_ptr,
   row_ids = row_ids,      # New addition
+  dist_mat_anchors_sq = dist_mat_anchors_sq,
   # ---------------------------
   
   # Thermal Niche (Matching the Parametric Double Logistic model)
