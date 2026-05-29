@@ -32,7 +32,7 @@ raw$parentDatasetID_2 <- ifelse(is.na(raw$parentDatasetID),
 raw$lifeStage <- ifelse(is.na(raw$lifeStage), "unknown", as.character(raw$lifeStage))
 
 # Filter for adults & unknown (likely adults)
-raw_2 <- raw %>% filter(lifeStage %in% c("adult", "exuvia", "teneral", "unknown"))
+raw_2 <- raw %>% filter(lifeStage %in% c("adult", "teneral", "unknown"))
 setDT(raw_2)
 
 ## --- TAXONOMY JOIN ---

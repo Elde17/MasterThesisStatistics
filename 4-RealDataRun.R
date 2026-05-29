@@ -4,7 +4,6 @@ library(Microsoft365R)
 library(cmdstanr)
 library(posterior)
 
-# "device_code" is required for headless servers
 od <- get_personal_onedrive(auth_type = "device_code")
 cat("Background Job is running in:", getwd(), "\n")
 
@@ -13,24 +12,22 @@ cat("Background Job is running in:", getwd(), "\n")
 # ============================================================================== #
 cat("\n--- 1. Downloading Files from OneDrive ---\n")
 # Download the specific data and the NEW optimized Stan script
-od$download_file("Param_CSR_GP_ST_optimized.stan", dest="Param_CSR_GP_ST_optimized.stan", overwrite=TRUE)
-od$download_file("stan_data_ZwaHei_HybridIDE.rds", dest="stan_data_ZwaHei_HybridIDE.rds", overwrite=TRUE)
-stan_data <- readRDS("stan_data_ZwaHei_HybridIDE.rds")
+od$download_file("Model.stan", dest="Model.stan", overwrite=TRUE)
+od$download_file("stan_data.rds", dest="stan_data.rds", overwrite=TRUE)
+stan_data <- readRDS("stan_data.rds")
 
 # ==============================================================================
 # 2. COMPILATION WITH ABSOLUTE CORE ENFORCEMENT
 # ==============================================================================
 cat("\n--- 2. Compiling Optimized Model Architecture ---\n")
 
-# Turning stan_threads to FALSE guarantees Stan will 
-# never spawn background threads. Each chain is strictly locked to 1 CPU core.
 cpp_options <- list(
   stan_threads = FALSE, 
   CXXFLAGS = "-O3 -march=native -mtune=native"
 )
 cmdstan_make_local(cpp_options = cpp_options)
 
-mod <- cmdstan_model("Param_CSR_GP_ST_optimized.stan", force_recompile = TRUE)
+mod <- cmdstan_model("Model.stan", force_recompile = TRUE)
 
 # ============================================================================== #
 # 3. DATA PATCH & PREPARATION ####
@@ -60,30 +57,39 @@ cat("GP Knots (N_spatial_bf):", stan_data$N_spatial_bf, "\n")
 cat("Data Patch Complete. Ready for Optimized CSR Run.\n")
 
 # ============================================================================== #
-# COMPILATION & UPDATED INITS ####
+# COMPILATION & INITS ####
 # ============================================================================== #
+S <- stan_data$S
+T_total <- stan_data$T_total
+N_spatial_bf <- stan_data$N_spatial_bf
+
 make_init_hybrid <- function() {
   list(
-    thermal_max = rnorm(1, 0.0, 1.0),  # Weakly informative prior baseline matching chapter text
-    T_nodes = c(runif(1, 4, 6), runif(1, 14, 16)), 
-    slope_L = runif(1, 0.8, 1.2), 
-    slope_R = runif(1, 0.8, 1.2),
     r = runif(1, 0.05, 0.2),
+    log_alpha = rnorm(1, 2.7, 0.5),
+    N0_proportion = runif(1, 0.2, 0.4),
+    
+    # Temporal
+    sigma_year = runif(1, 0.01, 0.05),
+    eps_year_raw = rnorm(T_total, 0, 0.01),
+    
+    # Spatial Fields
+    rho_phi = runif(1, 50, 150),
+    rho_gamma = runif(1, 100, 200),
+    sigma_phi = runif(1, 0.1, 0.2),
+    phi_eta = rnorm(N_spatial_bf, 0, 0.01),
+    sigma_gamma = runif(1, 0.05, 0.1),
+    gamma_eta = rnorm(N_spatial_bf, 0, 0.01),
+    
+    # Detection & Thermal
     logit_p = rnorm(1, -2.0, 0.2),
-    log_alpha = rnorm(1, mean = 2.7, sd = 0.5),
-    N0_proportion = runif(1, 0.4, 0.6),
-    
-    rho_phi = runif(1, 1.5, 2.5),        
-    rho_gamma = runif(1, 4.5, 5.5),      
-    sigma_phi = runif(1, 0.01, 0.08),
-    phi_eta = rnorm(20, 0, 0.01),
-    
-    sigma_gamma = runif(1, 0.001, 0.02),
-    gamma_eta = rnorm(20, 0, 0.01),
-    sigma_year = runif(1, 0.005, 0.03),
-    eps_year_raw = rnorm(30, mean = 0, sd = 0.01)
+    thermal_max = rnorm(1, 0, 1),
+    T_nodes = c(2.0, 11.0),
+    slope_L = runif(1, 1.0, 1.5),
+    slope_R = runif(1, 1.0, 1.5)
   )
 }
+
 
 # ============================================================================== #
 # MCMC RUN ####
@@ -96,8 +102,8 @@ fit_real <- mod$sample(
   data = stan_data,
   chains = 6, 
   parallel_chains = 6,   
-  iter_warmup = 200,     
-  iter_sampling = 200,
+  iter_warmup = 150,     
+  iter_sampling = 150,
   init = make_init_hybrid, 
   adapt_delta = 0.9,    
   max_treedepth = 12,    

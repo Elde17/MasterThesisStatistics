@@ -182,13 +182,68 @@ plot(dens, main = paste("Phenology Spline:", target_species), xlab = "Day of Yea
 abline(v = c(start_95, end_95), col = "red", lty = 2)
 mtext("95% Window", at = start_95, col = "red")
 
+# --- 1. Capture the "Before" state ---
+n_initial <- nrow(data)
+
+# --- 2. Perform the filter ---
+# Now we update the data object
+data <- data[doy >= start_95 & doy <= end_95]
+
+# --- 3. Calculate the stats based on the comparison ---
+n_final <- nrow(data)
+n_dropped <- n_initial - n_final
+pct_kept <- round((n_final / n_initial) * 100, 2)
+
+# --- 4. Report the results ---
+cat("\n--- Phenology Filter Summary ---\n")
+cat(paste("Total initial visits:    ", n_initial, "\n"))
+cat(paste("Visits kept (in window): ", n_final, " (", pct_kept, "%)\n", sep=""))
+cat(paste("Visits discarded:        ", n_dropped, "\n"))
+cat("---------------------------------\n")
+
 # Apply the 95% Filter
 # This removes visits that happened outside the core flight season
 n_before <- nrow(data)
 data <- data[doy >= start_95 & doy <= end_95]
 n_after <- nrow(data)
 
-cat(paste("Filtered out", n_before - n_after, "visits outside the 95% window.\n"))
+
+library(ggplot2)
+
+# Create a dataframe for plotting
+plot_data <- data.table(x = dens$x, y = dens$y)
+plot_data[, cumulative := cumsum(y) / sum(y)]
+
+# Highlight the 95% region
+plot_data[, is_window := ifelse(x >= start_95 & x <= end_95, "Yes", "No")]
+
+# The Plot
+p_pheno <- ggplot(plot_data, aes(x = x, y = y)) +
+  # Draw the full curve
+  geom_area(fill = "gray80", alpha = 0.5) +
+  # Highlight the 95% window
+  geom_area(data = plot_data[is_window == "Yes"], fill = "#2C3E50", alpha = 0.8) +
+  # Add vertical lines for the boundaries
+  geom_vline(xintercept = c(start_95, end_95), linetype = "dashed", color = "firebrick", linewidth = 0.8) +
+  # Labels and styling
+  labs(
+    title = paste("Species Phenology:", target_species),
+    subtitle = paste("95% Flight Window: DOY", start_95, "-", end_95),
+    x = "Day of Year (DOY)",
+    y = "Density"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  )
+
+print(p_pheno)
+
+# Save for thesis
+ggsave("Phenology_Window.pdf", plot = p_pheno, width = 7, height = 4)
+
 
 # ============================================================================== #
 # 3. DYNAMIC ERA5 CLIMATE INTEGRATION & MAINLAND CONNECTIVITY ####
@@ -479,66 +534,46 @@ obs_data[, obs_time_id := year - min(obs_years) + 1]
 # state mapping
 obs_data[, state_idx := (obs_time_id - 1) * n_sites + obs_state_id]
 
+
 # ============================================================================== #
 # 7. SPATIAL BASES (20 Habitat Splines + CSR Dispersal) ####
 # ============================================================================== #
-cat("\n--- 6. Computing Hybrid Spatial Bases ---\n")
+cat("\n--- 6. Computing Hybrid Spatial Bases & CSR Dispersal ---\n")
 
-# --- 6a. HABITAT SPLINES (With Boundary Buffer) ---
-# Force everything to match your 'valid_sites' order
+# --- 6a. HABITAT SPLINES ---
 my_grid_mainland <- my_grid_mainland[match(valid_sites, my_grid_mainland$grid_id), ]
-centroids_raw <- st_coordinates(st_centroid(my_grid_mainland))
-
-cat("Generating padded spatial basis functions...\n")
-set.seed(42)
-N_target_bf <- 20
 coords_raw <- st_coordinates(st_centroid(my_grid_mainland))
 
-# 1. Create a Bounding Box that is 10% larger than your study area
-# This is the "Extra" that manages boundary effects
-buffer_pct <- 0.10
-xlim <- range(coords_raw[,1]) + c(-1, 1) * diff(range(coords_raw[,1])) * buffer_pct
-ylim <- range(coords_raw[,2]) + c(-1, 1) * diff(range(coords_raw[,2])) * buffer_pct
+set.seed(42)
+N_target_bf <- 20
+grid_size <- 10 
+buffer_pct <- 0.10 # <-- DEFINED HERE
 
-# 2. Create a dense grid of potential knots over this expanded box
-# We start with more than 20 and filter down
-grid_size <- 10 # 10x10 = 100 potential knots
+# Rename these to avoid ggplot2 namespace collision
+x_lim_vals <- range(coords_raw[,1]) + c(-1, 1) * diff(range(coords_raw[,1])) * buffer_pct
+y_lim_vals <- range(coords_raw[,2]) + c(-1, 1) * diff(range(coords_raw[,2])) * buffer_pct
+
 potential_knots <- expand.grid(
-  X = seq(xlim[1], xlim[2], length.out = grid_size),
-  Y = seq(ylim[1], ylim[2], length.out = grid_size)
+  X = seq(x_lim_vals[1], x_lim_vals[2], length.out = grid_size),
+  Y = seq(y_lim_vals[1], y_lim_vals[2], length.out = grid_size)
 )
 
-# 3. Filter knots to only those near your study area (within 150km)
-# This keeps the "Extra" but removes knots in the deep Atlantic
 potential_sf <- st_as_sf(potential_knots, coords = c("X", "Y"), crs = st_crs(my_grid_mainland))
 dist_to_mainland <- st_distance(potential_sf, st_union(my_grid_mainland))
-keep_idx <- which(as.numeric(dist_to_mainland) < 150000) # 150km buffer
+keep_idx <- which(as.numeric(dist_to_mainland) < 150000) 
 
-# 4. Use K-means to reduce these "relevant" knots to exactly 20
 final_knots_sf <- potential_sf[keep_idx, ]
 km_final <- kmeans(st_coordinates(final_knots_sf), centers = N_target_bf)
-knots <- km_final$centers # Final 20 knots with boundary coverage
+knots <- km_final$centers 
 
-# 5. Build the Distance Matrices for Stan
 dist_sk <- st_distance(st_centroid(my_grid_mainland), 
                        st_as_sf(as.data.frame(knots), coords = c("X", "Y"), crs = st_crs(my_grid_mainland)))
 
-# STRIP UNITS and preserve matrix shape (Rows = Grid Cells, Cols = 20 Knots)
-dist_mat_raw <- matrix(as.numeric(dist_sk), 
-                       nrow = nrow(my_grid_mainland), 
-                       ncol = nrow(knots)) / 1000 
-
-dist_mat_anchors <- as.matrix(dist(knots)) / 1000
-
-# --- Convert Linear Distances to Smooth Radial Basis Functions (RBF) ---
-# Calculate a bandwidth (sigma) based on the distance between knots
-bandwidth <- median(dist_mat_anchors[dist_mat_anchors > 0]) 
-
-# Apply the Gaussian Kernel formula (No units = No errors!)
+dist_mat_raw <- matrix(as.numeric(dist_sk), nrow = nrow(my_grid_mainland), ncol = nrow(knots)) / 1000 
+dist_mat_anchors_sq <- as.matrix(dist(knots / 1000))^2
+bandwidth <- median(as.matrix(dist(knots / 1000))[as.matrix(dist(knots / 1000)) > 0]) 
 spatial_bf <- exp(-(dist_mat_raw^2) / (2 * bandwidth^2))
 N_spatial_bf <- ncol(spatial_bf)
-
-cat("GP Basis computed using RBF bandwidth of", round(bandwidth, 2), "km\n")
 
 # --- 6b. CSR DISPERSAL (The "How they move") ---
 library(Matrix)
@@ -546,44 +581,40 @@ cat("\n--- Generating CSR Network (200km cutoff) ---\n")
 
 dist_mat_disp <- as.matrix(st_distance(st_centroid(my_grid_mainland)))
 dist_mat_disp <- units::drop_units(dist_mat_disp) / 1000 
-
-threshold_km <- 200.0
-dist_mat_disp[dist_mat_disp > threshold_km] <- 0 
+dist_mat_disp[dist_mat_disp > 200.0] <- 0 
 diag(dist_mat_disp) <- 0 
 
-sp_mat_gen <- as(drop0(dist_mat_disp), "generalMatrix")
-sp_mat_R <- as(sp_mat_gen, "RsparseMatrix")
+sp_mat <- drop0(Matrix(dist_mat_disp, sparse = TRUE))
+triplet <- summary(sp_mat)
 
-# Extract the vectors for Row-Stochastic Normalization
-dists <- sp_mat_R@x
-to_idx <- sp_mat_R@j + 1                   # Column indices
-row_ptr <- sp_mat_R@p + 1                  # Row pointers
-row_ids <- rep(1:n_sites, diff(sp_mat_R@p)) # Explicit Row IDs
-E_disp <- length(dists)
+# triplet$i = row (Destination/to_idx), triplet$j = col (Source/from_idx)
+to_idx   <- triplet$i   
+from_idx <- triplet$j   
+dists    <- triplet$x   
+E_disp   <- length(dists)
 
 cat("Generated CSR Network with", E_disp, "edges.\n")
 
-# --- Re-format the temperature vector into a T_total x S matrix ---
-# This ensures that temp_idx_mat[t, s] is the temperature for year t, site s
-temp_idx_mat <- matrix(temp_indices_vec, nrow = length(all_years), ncol = n_sites, byrow = TRUE)
-
-
 # ============================================================================== #
-# 8. ASSEMBLE STAN DATA LIST (Final Production Version) ####
+# 8. ASSEMBLE CLEAN STAN DATA LIST ####
 # ============================================================================== #
 cat("\n--- 7. Assembling Final Stan Data List ---\n")
 
-# Calculate squared distances in R
-dist_mat_anchors_sq <- dist_mat_anchors^2
+# Ensure Temp Indices match Time-Major Order: [Year 1 Site 1...S, Year 2 Site 1...S...]
+# This assumes temp_indices_vec is ordered: year1_site1, year1_site2 ... yearT_siteS
+temp_idx_stan <- as.integer(temp_indices_vec) 
+
+t_scaled <- seq(-0.5, 0.5, length.out = length(all_years))
 
 stan_data_real <- list(
+  t_scaled = t_scaled,
+  
   S = n_sites,
   T_total = length(all_years),
   T_obs = length(obs_years),
   N_obs_total = nrow(obs_data),
+  N_state_total = n_sites * length(obs_years),
   
-  # Observations (Y <= K check passed earlier)
-  N_state_total = n_sites * length(obs_years), # [ADDED]
   Y_vec = as.integer(obs_data$`Sympetrum danae`),
   K_visits_vec = as.integer(obs_data$num_visits),
   idx_seen = which(as.integer(obs_data$`Sympetrum danae`) > 0),
@@ -592,28 +623,22 @@ stan_data_real <- list(
   N_zero = sum(as.integer(obs_data$`Sympetrum danae`) == 0),
   map_state_idx = obs_data$state_idx,
   
-  # Habitat Splines
-  N_spatial_bf = N_spatial_bf,
-  spatial_bf = spatial_bf,
-  dist_mat_anchors = dist_mat_anchors,
-  
-  # --- THE CSR REPLACEMENT ---
   E_disp = E_disp,
   dists = dists,
-  to_idx = to_idx,        # Renamed
-  row_ptr = row_ptr,
-  row_ids = row_ids,      # New addition
-  dist_mat_anchors_sq = dist_mat_anchors_sq,
-  # ---------------------------
+  from_idx = from_idx,
+  to_idx = to_idx,
   
-  # Thermal Niche (Matching the Parametric Double Logistic model)
+  N_spatial_bf = N_spatial_bf,
+  spatial_bf = spatial_bf,
+  dist_mat_anchors_sq = dist_mat_anchors_sq,
+  
   N_thermal_gradient = N_thermal_gradient,
   thermal_gradient = thermal_gradient,
-  temp_idx = as.vector(t(temp_idx_mat))
+  temp_idx = temp_idx_stan
 )
 
-saveRDS(stan_data_real, "stan_data_ZwaHei_HybridIDE.rds")
-cat("Data list successfully saved for Hybrid IDE.\n")
+saveRDS(stan_data_real, "stan_data.rds")
+cat("Data list successfully saved. Ready for Stan.\n")
 
 # ============================================================================== #
 # 9. FINAL AUDIT ####
